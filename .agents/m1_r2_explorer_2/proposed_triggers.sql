@@ -1,0 +1,145 @@
+-- Synchronize Changelogs fields (is_published <-> status, raw_markdown <-> markdown_body)
+CREATE OR REPLACE FUNCTION public.sync_changelog_fields()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        -- Delta detection for status <-> is_published
+        IF NEW.status IS DISTINCT FROM OLD.status THEN
+            NEW.is_published = (NEW.status = 'published');
+        ELSIF NEW.is_published IS DISTINCT FROM OLD.is_published THEN
+            IF NEW.is_published THEN
+                NEW.status = 'published';
+            ELSE
+                NEW.status = 'draft';
+            END IF;
+        END IF;
+
+        -- Delta detection for markdown fields
+        IF NEW.markdown_body IS DISTINCT FROM OLD.markdown_body THEN
+            NEW.raw_markdown = COALESCE(NEW.markdown_body, '');
+        ELSIF NEW.raw_markdown IS DISTINCT FROM OLD.raw_markdown THEN
+            NEW.markdown_body = COALESCE(NEW.raw_markdown, '');
+        END IF;
+    ELSE -- INSERT
+        IF NEW.status = 'published' THEN
+            NEW.is_published = TRUE;
+        ELSIF NEW.is_published = TRUE THEN
+            NEW.status = 'published';
+        ELSE
+            NEW.is_published = FALSE;
+            NEW.status = 'draft';
+        END IF;
+
+        IF NEW.markdown_body IS NOT NULL AND NEW.markdown_body <> '' AND (NEW.raw_markdown IS NULL OR NEW.raw_markdown = '') THEN
+            NEW.raw_markdown = NEW.markdown_body;
+        ELSIF NEW.raw_markdown IS NOT NULL AND NEW.raw_markdown <> '' AND (NEW.markdown_body IS NULL OR NEW.markdown_body = '') THEN
+            NEW.markdown_body = NEW.raw_markdown;
+        END IF;
+    END IF;
+
+    -- Manage published_at timestamp
+    IF NEW.is_published = TRUE THEN
+        IF NEW.published_at IS NULL THEN
+            NEW.published_at = timezone('utc'::text, now());
+        END IF;
+    ELSIF NEW.is_published = FALSE THEN
+        NEW.published_at = NULL;
+    END IF;
+
+    -- Ensure non-null invariants
+    NEW.raw_markdown = COALESCE(NEW.raw_markdown, '');
+    NEW.markdown_body = COALESCE(NEW.markdown_body, '');
+    NEW.is_published = COALESCE(NEW.is_published, FALSE);
+    NEW.status = COALESCE(NEW.status, 'draft');
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_sync_changelog_fields
+    BEFORE INSERT OR UPDATE ON public.changelogs
+    FOR EACH ROW EXECUTE FUNCTION public.sync_changelog_fields();
+
+-- Synchronize Pull Request fields (author <-> author_login, changelog_id <-> release_id, status <-> is_filtered)
+CREATE OR REPLACE FUNCTION public.sync_pull_request_fields()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        -- 1. Sync author <-> author_login
+        IF NEW.author_login IS DISTINCT FROM OLD.author_login THEN
+            NEW.author = COALESCE(NEW.author_login, '');
+        ELSIF NEW.author IS DISTINCT FROM OLD.author THEN
+            NEW.author_login = COALESCE(NEW.author, '');
+        END IF;
+
+        -- 2. Sync changelog_id <-> release_id (unlinking and attachment)
+        IF (NEW.changelog_id IS NULL AND OLD.changelog_id IS NOT NULL) OR
+           (NEW.release_id IS NULL AND OLD.release_id IS NOT NULL) THEN
+            NEW.changelog_id = NULL;
+            NEW.release_id = NULL;
+            -- If released PR is detached, return to unreleased queue
+            IF (NEW.status IS NOT DISTINCT FROM OLD.status) AND NEW.status = 'released' THEN
+                NEW.status = 'unreleased';
+                NEW.is_filtered = FALSE;
+            END IF;
+        ELSIF NEW.changelog_id IS DISTINCT FROM OLD.changelog_id THEN
+            NEW.release_id = NEW.changelog_id;
+        ELSIF NEW.release_id IS DISTINCT FROM OLD.release_id THEN
+            NEW.changelog_id = NEW.release_id;
+        END IF;
+
+        -- 3. Sync status <-> is_filtered
+        IF NEW.status IS DISTINCT FROM OLD.status THEN
+            IF NEW.status IN ('unreleased', 'queued', 'included', 'released') THEN
+                NEW.is_filtered = FALSE;
+            ELSIF NEW.status IN ('excluded', 'filtered') THEN
+                NEW.is_filtered = TRUE;
+            END IF;
+        ELSIF NEW.is_filtered IS DISTINCT FROM OLD.is_filtered THEN
+            IF NEW.is_filtered = FALSE THEN
+                NEW.status = 'unreleased';
+            ELSIF NEW.is_filtered = TRUE THEN
+                IF NEW.status NOT IN ('excluded', 'filtered') THEN
+                    NEW.status = 'excluded';
+                END IF;
+            END IF;
+        END IF;
+
+    ELSE -- INSERT
+        -- 1. Sync author <-> author_login
+        IF COALESCE(NEW.author_login, '') <> '' AND COALESCE(NEW.author, '') = '' THEN
+            NEW.author = NEW.author_login;
+        ELSIF COALESCE(NEW.author, '') <> '' AND COALESCE(NEW.author_login, '') = '' THEN
+            NEW.author_login = NEW.author;
+        END IF;
+
+        -- 2. Sync release/changelog IDs
+        IF NEW.changelog_id IS NOT NULL AND NEW.release_id IS NULL THEN
+            NEW.release_id = NEW.changelog_id;
+        ELSIF NEW.release_id IS NOT NULL AND NEW.changelog_id IS NULL THEN
+            NEW.changelog_id = NEW.release_id;
+        END IF;
+
+        -- 3. Sync status and noise filter
+        IF NEW.status IN ('excluded', 'filtered') THEN
+            NEW.is_filtered = TRUE;
+        ELSIF NEW.is_filtered = TRUE THEN
+            NEW.status = 'excluded';
+        ELSIF NEW.status IN ('unreleased', 'queued', 'included', 'released') THEN
+            NEW.is_filtered = FALSE;
+        END IF;
+    END IF;
+
+    -- Ensure non-null invariants
+    NEW.author = COALESCE(NEW.author, '');
+    NEW.author_login = COALESCE(NEW.author_login, '');
+    NEW.is_filtered = COALESCE(NEW.is_filtered, FALSE);
+    NEW.status = COALESCE(NEW.status, 'unreleased');
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_sync_pull_request_fields
+    BEFORE INSERT OR UPDATE ON public.pull_requests
+    FOR EACH ROW EXECUTE FUNCTION public.sync_pull_request_fields();

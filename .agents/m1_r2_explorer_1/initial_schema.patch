@@ -1,0 +1,172 @@
+--- supabase/migrations/20260922000001_initial_schema.sql	2026-09-22 23:38:48.437848094 +0530
++++ .agents/m1_r2_explorer_1/proposed_20260922000001_initial_schema.sql	2026-09-23 00:01:58.428876288 +0530
+@@ -23,7 +23,8 @@
+ );
+ 
+ -- Backward-compatibility View: public.users aliased to public.profiles
+-CREATE OR REPLACE VIEW public.users AS
++-- security_invoker = true ensures RLS policies of invoker are evaluated
++CREATE OR REPLACE VIEW public.users WITH (security_invoker = true) AS
+ SELECT
+     id,
+     email,
+@@ -183,31 +184,52 @@
+ CREATE OR REPLACE FUNCTION public.sync_changelog_fields()
+ RETURNS TRIGGER AS $$
+ BEGIN
+-    -- Synchronize publish boolean & status
+-    IF NEW.is_published = TRUE AND (NEW.status IS NULL OR NEW.status = 'draft') THEN
+-        NEW.status = 'published';
+-    ELSIF NEW.status = 'published' THEN
+-        NEW.is_published = TRUE;
+-    ELSIF NEW.is_published = FALSE AND (NEW.status IS NULL OR NEW.status = 'published') THEN
+-        NEW.status = 'draft';
+-    ELSIF NEW.status = 'draft' THEN
+-        NEW.is_published = FALSE;
++    IF TG_OP = 'UPDATE' THEN
++        -- Synchronize status & is_published based on which field changed
++        IF NEW.status IS DISTINCT FROM OLD.status THEN
++            NEW.is_published = (NEW.status = 'published');
++        ELSIF NEW.is_published IS DISTINCT FROM OLD.is_published THEN
++            IF NEW.is_published = TRUE THEN
++                NEW.status = 'published';
++            ELSE
++                NEW.status = 'draft';
++            END IF;
++        END IF;
++
++        -- Synchronize markdown body & raw_markdown based on which field changed
++        IF NEW.markdown_body IS DISTINCT FROM OLD.markdown_body THEN
++            NEW.raw_markdown = NEW.markdown_body;
++        ELSIF NEW.raw_markdown IS DISTINCT FROM OLD.raw_markdown THEN
++            NEW.markdown_body = NEW.raw_markdown;
++        END IF;
++    ELSE -- TG_OP = 'INSERT'
++        -- Initialize status & is_published
++        IF NEW.is_published = TRUE THEN
++            NEW.status = 'published';
++        ELSIF NEW.status = 'published' THEN
++            NEW.is_published = TRUE;
++        ELSE
++            NEW.is_published = FALSE;
++            NEW.status = 'draft';
++        END IF;
++
++        -- Initialize markdown fields
++        IF NEW.markdown_body IS NOT NULL AND NEW.markdown_body <> '' AND (NEW.raw_markdown IS NULL OR NEW.raw_markdown = '') THEN
++            NEW.raw_markdown = NEW.markdown_body;
++        ELSIF NEW.raw_markdown IS NOT NULL AND NEW.raw_markdown <> '' AND (NEW.markdown_body IS NULL OR NEW.markdown_body = '') THEN
++            NEW.markdown_body = NEW.raw_markdown;
++        END IF;
+     END IF;
+ 
+-    -- Automatically set published_at timestamp
+-    IF NEW.is_published = TRUE AND NEW.published_at IS NULL THEN
+-        NEW.published_at = timezone('utc'::text, now());
+-    ELSIF NEW.is_published = FALSE THEN
++    -- Automatically maintain published_at timestamp
++    IF NEW.is_published = TRUE THEN
++        IF NEW.published_at IS NULL THEN
++            NEW.published_at = timezone('utc'::text, now());
++        END IF;
++    ELSE
+         NEW.published_at = NULL;
+     END IF;
+ 
+-    -- Synchronize markdown fields
+-    IF NEW.raw_markdown IS NOT NULL AND NEW.raw_markdown <> '' AND (NEW.markdown_body IS NULL OR NEW.markdown_body = '') THEN
+-        NEW.markdown_body = NEW.raw_markdown;
+-    ELSIF NEW.markdown_body IS NOT NULL AND NEW.markdown_body <> '' AND (NEW.raw_markdown IS NULL OR NEW.raw_markdown = '') THEN
+-        NEW.raw_markdown = NEW.markdown_body;
+-    END IF;
+-
+     RETURN NEW;
+ END;
+ $$ LANGUAGE plpgsql;
+@@ -220,25 +242,58 @@
+ CREATE OR REPLACE FUNCTION public.sync_pull_request_fields()
+ RETURNS TRIGGER AS $$
+ BEGIN
+-    -- Sync author names
+-    IF NEW.author_login IS NOT NULL AND NEW.author_login <> '' AND (NEW.author IS NULL OR NEW.author = '') THEN
+-        NEW.author = NEW.author_login;
+-    ELSIF NEW.author IS NOT NULL AND NEW.author <> '' AND (NEW.author_login IS NULL OR NEW.author_login = '') THEN
+-        NEW.author_login = NEW.author;
+-    END IF;
+-
+-    -- Sync release/changelog IDs
+-    IF NEW.changelog_id IS NOT NULL AND NEW.release_id IS NULL THEN
+-        NEW.release_id = NEW.changelog_id;
+-    ELSIF NEW.release_id IS NOT NULL AND NEW.changelog_id IS NULL THEN
+-        NEW.changelog_id = NEW.release_id;
+-    END IF;
+-
+-    -- Sync status and noise filter
+-    IF NEW.is_filtered = TRUE AND NEW.status NOT IN ('excluded', 'filtered') THEN
+-        NEW.status = 'excluded';
+-    ELSIF NEW.status IN ('excluded', 'filtered') THEN
+-        NEW.is_filtered = TRUE;
++    IF TG_OP = 'UPDATE' THEN
++        -- Author sync on UPDATE
++        IF NEW.author_login IS DISTINCT FROM OLD.author_login THEN
++            NEW.author = NEW.author_login;
++        ELSIF NEW.author IS DISTINCT FROM OLD.author THEN
++            NEW.author_login = NEW.author;
++        END IF;
++
++        -- Release / Changelog ID sync on UPDATE (handles unlinking cleanly)
++        IF NEW.changelog_id IS DISTINCT FROM OLD.changelog_id THEN
++            NEW.release_id = NEW.changelog_id;
++        ELSIF NEW.release_id IS DISTINCT FROM OLD.release_id THEN
++            NEW.changelog_id = NEW.release_id;
++        END IF;
++
++        -- Status & noise filter sync on UPDATE
++        IF NEW.status IS DISTINCT FROM OLD.status THEN
++            IF NEW.status IN ('excluded', 'filtered') THEN
++                NEW.is_filtered = TRUE;
++            ELSE
++                NEW.is_filtered = FALSE;
++            END IF;
++        ELSIF NEW.is_filtered IS DISTINCT FROM OLD.is_filtered THEN
++            IF NEW.is_filtered = TRUE THEN
++                NEW.status = 'excluded';
++            ELSE
++                IF NEW.status IN ('excluded', 'filtered') THEN
++                    NEW.status = 'unreleased';
++                END IF;
++            END IF;
++        END IF;
++    ELSE -- TG_OP = 'INSERT'
++        -- Author sync on INSERT
++        IF NEW.author_login IS NOT NULL AND NEW.author_login <> '' AND (NEW.author IS NULL OR NEW.author = '') THEN
++            NEW.author = NEW.author_login;
++        ELSIF NEW.author IS NOT NULL AND NEW.author <> '' AND (NEW.author_login IS NULL OR NEW.author_login = '') THEN
++            NEW.author_login = NEW.author;
++        END IF;
++
++        -- Release / Changelog ID sync on INSERT
++        IF NEW.changelog_id IS NOT NULL AND NEW.release_id IS NULL THEN
++            NEW.release_id = NEW.changelog_id;
++        ELSIF NEW.release_id IS NOT NULL AND NEW.changelog_id IS NULL THEN
++            NEW.changelog_id = NEW.release_id;
++        END IF;
++
++        -- Status & noise filter sync on INSERT
++        IF NEW.is_filtered = TRUE AND NEW.status NOT IN ('excluded', 'filtered') THEN
++            NEW.status = 'excluded';
++        ELSIF NEW.status IN ('excluded', 'filtered') THEN
++            NEW.is_filtered = TRUE;
++        END IF;
+     END IF;
+ 
+     RETURN NEW;
+@@ -265,7 +320,7 @@
+         updated_at = timezone('utc'::text, now());
+     RETURN NEW;
+ END;
+-$$ LANGUAGE plpgsql SECURITY DEFINER;
++$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+ 
+ CREATE OR REPLACE TRIGGER on_auth_user_created
+     AFTER INSERT ON auth.users

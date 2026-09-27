@@ -1,0 +1,42 @@
+# Progress Log — M1 Security & RLS Explorer (Iteration 2)
+Last visited: 2026-09-22T18:35:00Z
+
+## Status: COMPLETED
+- [x] Initialized DISPATCH.md, BRIEFING.md, and progress.md
+- [x] Read mandatory documents:
+  - [x] /home/alok/Projects_Antigravity/bsAK/ORIGINAL_REQUEST.md
+  - [x] /home/alok/Projects_Antigravity/bsAK/PROJECT.md
+  - [x] /home/alok/Projects_Antigravity/bsAK/.agents/m1_reviewer_2/handoff.md
+  - [x] /home/alok/Projects_Antigravity/bsAK/.agents/m1_challenger_2/handoff.md
+- [x] Inspect existing SQL migrations:
+  - [x] supabase/migrations/20260922000001_initial_schema.sql
+  - [x] supabase/migrations/20260922000002_rls_policies.sql
+- [x] Inspect client queries / tests:
+  - [x] tests/unit/foundation.test.ts
+  - [x] tests/unit/database-stress.test.ts
+  - [x] lib/supabase/ (client, server, admin)
+- [x] Design drop-in SQL fixes:
+  - [x] Fix universal RLS leak on public.projects (drop USING (true), add get_project_public_info RPC)
+  - [x] Fix profile tier escalation on public.profiles (protect_profile_tier trigger with role checks)
+  - [x] Fix trigger state traps in initial_schema.sql (TG_OP = 'UPDATE' and IS DISTINCT FROM delta handling)
+  - [x] Add WITH (security_invoker = true) to public.users view
+  - [x] Add SET search_path = public, pg_temp to handle_new_user()
+  - [x] Add import 'server-only' to lib/supabase/admin.ts
+- [x] Empirical validation in live PostgreSQL 16 container:
+  - [x] Verified migrations parse cleanly
+  - [x] Verified cross-tenant project leakage is eliminated (Bob cannot see Alice's project)
+  - [x] Verified anon cannot read public.projects table directly
+  - [x] Verified anon can safely query sanitized public project info via RPC
+  - [x] Verified tier escalation by authenticated user is blocked with exception
+  - [x] Verified legitimate display profile update succeeds
+  - [x] Verified service_role can upgrade tier to Pro
+  - [x] Verified changelog unpublishing succeeds without trigger state trap
+  - [x] Verified PR unlinking and un-exclusion succeed without trigger state trap
+- [x] Generated machine-applicable patch files:
+  - [x] .agents/m1_r2_explorer_1/initial_schema.patch
+  - [x] .agents/m1_r2_explorer_1/rls_policies.patch
+  - [x] .agents/m1_r2_explorer_1/proposed_20260922000001_initial_schema.sql
+  - [x] .agents/m1_r2_explorer_1/proposed_20260922000002_rls_policies.sql
+- [x] Update BRIEFING.md
+- [x] Write handoff.md following 5-component protocol
+- [x] Send handoff message to parent (48f954c7-ebf6-4748-95d0-1158ee50e1cd)

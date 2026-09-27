@@ -1,0 +1,9 @@
+--- a/components/ui/toast.tsx
++++ b/components/ui/toast.tsx
+@@ -126,5 +126,6 @@
+   ToastTitle,
+   ToastDescription,
+   ToastClose,
+   ToastAction,
++  toastVariants,
+ };
